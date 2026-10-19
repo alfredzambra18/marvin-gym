@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.orig
+*.db
+*.db.before_restore
+.env
+build/
+dist/
+*.spec
