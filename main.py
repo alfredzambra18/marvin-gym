@@ -11,6 +11,12 @@ import logging
 from logging.handlers import RotatingFileHandler
 import webbrowser
 import csv
+import tkcalendar
+from fpdf import FPDF
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import tkinter as tk
 from contextlib import contextmanager
 from tkinter import ttk, messagebox, filedialog
@@ -821,7 +827,7 @@ class GymApp(ctk.CTk):
     def ventana_nuevo_socio(self):
         top = ctk.CTkToplevel(self)
         top.title("Registrar Nuevo Socio")
-        top.geometry("420x640")
+        top.geometry("520x750")
         top.configure(fg_color=COLORS["bg_main"])
         top.transient(self)
 
@@ -976,7 +982,7 @@ class GymApp(ctk.CTk):
 
         top = ctk.CTkToplevel(self)
         top.title("Renovar Membresía")
-        top.geometry("360x380")
+        top.geometry("440x440")
         top.configure(fg_color=COLORS["bg_main"])
         top.transient(self)
 
@@ -1073,7 +1079,7 @@ class GymApp(ctk.CTk):
 
         top = ctk.CTkToplevel(self)
         top.title(f"Socio: {nom}")
-        top.geometry("820x640")
+        top.geometry("1100x800")
         top.configure(fg_color=COLORS["bg_main"])
         top.transient(self)
 
@@ -1165,10 +1171,12 @@ class GymApp(ctk.CTk):
         ent_ref.pack(fill="x")
         ent_ref.insert(0, ref or "")
 
-        label("Fecha de vencimiento (YYYY-MM-DD)")
-        ent_venc = ctk.CTkEntry(form, fg_color=COLORS["sidebar"], border_color=COLORS["border"])
-        ent_venc.pack(fill="x")
-        ent_venc.insert(0, f_venc or "")
+        label("Fecha de vencimiento")
+        ent_venc = tkcalendar.DateEntry(form, width=12, background=COLORS["card"], foreground=COLORS["text_main"], borderwidth=2, date_pattern="yyyy-mm-dd")
+        ent_venc.pack(fill="x", pady=2)
+        if f_venc:
+            try: ent_venc.set_date(f_venc)
+            except: pass
 
         ctk.CTkLabel(form, text=f"Fecha de ingreso: {f_ing or 'N/A'}",
                      font=("Inter", 10), text_color=COLORS["text_muted"]).pack(anchor="w", pady=(10, 0))
@@ -1264,6 +1272,25 @@ class GymApp(ctk.CTk):
             imc = (peso / ((altura / 100) ** 2)) if altura else 0
             tree.insert("", "end", values=(fecha, f"{peso:.1f}", f"{altura:.0f}",
                                           f"{imc:.1f}", notas or "-"))
+        if medidas:
+            fig, ax = plt.subplots(figsize=(5, 2), dpi=100)
+            fig.patch.set_facecolor(COLORS["sidebar"])
+            ax.set_facecolor(COLORS["sidebar"])
+            ax.spines['bottom'].set_color(COLORS["text_muted"])
+            ax.spines['left'].set_color(COLORS["text_muted"])
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.tick_params(axis='x', colors=COLORS["text_muted"])
+            ax.tick_params(axis='y', colors=COLORS["text_muted"])
+            
+            fechas = [m[1] for m in medidas]
+            pesos = [m[2] for m in medidas]
+            ax.plot(fechas, pesos, marker='o', color=COLORS["accent_primary"], linewidth=2)
+            ax.set_title("Evolucion del Peso", color=COLORS["text_main"], fontsize=10)
+            
+            canvas = FigureCanvasTkAgg(fig, master=frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True, padx=5, pady=5)
 
         def nueva():
             self.ventana_nueva_medida(socio_id, on_success=lambda: recargar("Progreso"))
@@ -1280,7 +1307,7 @@ class GymApp(ctk.CTk):
 
         top = ctk.CTkToplevel(self)
         top.title("Nueva Medida")
-        top.geometry("360x380")
+        top.geometry("440x440")
         top.configure(fg_color=COLORS["bg_main"])
         top.transient(self)
 
@@ -1347,6 +1374,43 @@ class GymApp(ctk.CTk):
                 "WHERE socio_id=? ORDER BY id DESC", (socio_id,), fetch=True):
             tree.insert("", "end", values=(p[0], p[1], f"${(p[2] or 0):.2f}",
                                           p[3] or "-", p[4] or "-"))
+        def generar_pdf():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Atención", "Selecciona un pago de la tabla.", parent=parent)
+                return
+            vals = tree.item(sel[0], "values")
+            fecha, concepto, monto, metodo, ref = vals
+            
+            socio_data = self.db.ejecutar("SELECT nombre, cedula FROM socios WHERE id=?", (socio_id,), fetch=True)[0]
+            nombre, cedula = socio_data[0], socio_data[1]
+            
+            archivo = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")], initialfile=f"Recibo_{cedula}_{ref}.pdf", parent=parent)
+            if not archivo: return
+            
+            try:
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", "B", 16)
+                pdf.cell(0, 10, "MARVIN GYM", ln=True, align="C")
+                pdf.set_font("Arial", size=12)
+                pdf.cell(0, 10, "Recibo de Pago", ln=True, align="C")
+                pdf.ln(10)
+                pdf.cell(0, 10, f"Socio: {nombre}", ln=True)
+                pdf.cell(0, 10, f"Cedula: {cedula}", ln=True)
+                pdf.cell(0, 10, f"Fecha: {fecha}", ln=True)
+                pdf.cell(0, 10, f"Concepto: {concepto}", ln=True)
+                pdf.cell(0, 10, f"Metodo: {metodo} | Ref: {ref}", ln=True)
+                pdf.set_font("Arial", "B", 14)
+                pdf.cell(0, 10, f"Monto: {monto}", ln=True)
+                pdf.output(archivo)
+                messagebox.showinfo("Éxito", f"Recibo guardado en:\n{archivo}", parent=parent)
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo crear PDF: {e}", parent=parent)
+
+        ctk.CTkButton(parent, text="🧾 Generar Recibo (PDF)", command=generar_pdf,
+                      fg_color="transparent", border_width=1, border_color=COLORS["text_muted"],
+                      text_color=COLORS["text_main"], width=200).pack(pady=5)
 
     def _build_tab_asist(self, parent, socio_id):
         frame = ctk.CTkFrame(parent, fg_color=COLORS["sidebar"], corner_radius=8)
@@ -1471,7 +1535,7 @@ class GymApp(ctk.CTk):
     def ventana_config(self):
         top = ctk.CTkToplevel(self)
         top.title("Ajustes del Sistema")
-        top.geometry("420x340")
+        top.geometry("520x420")
         top.configure(fg_color=COLORS["bg_main"])
         top.transient(self)
 
@@ -1547,6 +1611,12 @@ class GymApp(ctk.CTk):
     def eliminar_socio(self):
         if not self.selected_socio_id:
             messagebox.showwarning("Atención", "Selecciona un socio para eliminar.")
+            return
+            
+        dialog = ctk.CTkInputDialog(text="Ingrese clave de Administrador para eliminar:", title="Seguridad")
+        clave = dialog.get_input()
+        if not clave or not self.db.verificar_admin_pass(clave):
+            messagebox.showerror("Denegado", "Clave incorrecta o cancelada.")
             return
 
         row = self.db.ejecutar("SELECT nombre FROM socios WHERE id=?", (self.selected_socio_id,), fetch=True)
