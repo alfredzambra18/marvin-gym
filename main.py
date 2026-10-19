@@ -6,6 +6,9 @@ import shutil
 import os
 import time
 import hashlib
+import secrets
+import logging
+from logging.handlers import RotatingFileHandler
 import webbrowser
 import csv
 import tkinter as tk
@@ -88,9 +91,35 @@ COLORS = {
 }
 
 
+
+# ============================================================
+#  SEGURIDAD — HASH DE CONTRASEÑAS (PBKDF2 + salt)
+# ============================================================
+PBKDF2_ITERATIONS = 260_000
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
+
+def verify_password(password: str, stored: str) -> bool:
+    if not stored: return False
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iters, salt_hex, hash_hex = stored.split("$")
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), int(iters))
+            return secrets.compare_digest(dk.hex(), hash_hex)
+        except Exception: return False
+    legacy = hashlib.sha256(password.encode()).hexdigest()
+    return secrets.compare_digest(legacy, stored)
+
+def is_legacy_hash(stored: str) -> bool:
+    return bool(stored) and not stored.startswith("pbkdf2_sha256$")
+
 # ============================================================
 #  BASE DE DATOS
 # ============================================================
+
 class Database:
     def __init__(self):
         self.db_dir = Path(platformdirs.user_data_dir("MarvinGym", "MarvinGym"))
@@ -101,7 +130,10 @@ class Database:
     @contextmanager
     def get_connection(self):
         conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         try:
             yield conn
             conn.commit()
@@ -111,7 +143,9 @@ class Database:
         finally:
             conn.close()
 
+    _TABLAS_PERMITIDAS = {"socios", "pagos", "asistencias", "medidas", "configuracion"}
     def _columnas(self, tabla):
+        if tabla not in self._TABLAS_PERMITIDAS: raise ValueError(f"Tabla no permitida: {tabla}")
         with self.get_connection() as conn:
             return [r[1] for r in conn.execute(f"PRAGMA table_info({tabla})").fetchall()]
 
@@ -186,11 +220,12 @@ class Database:
             ):
                 cur.execute(idx)
 
-            pass_default = hashlib.sha256("admin123".encode()).hexdigest()
+            pass_default = hash_password("admin123")
             defaults = [
                 ("dias_alerta", "3"),
                 ("wa_plantilla", "Hola {nombre}, te recordamos que tu membresía de Marvin Gym ({plan}) vence el {vencimiento}. ¡Te esperamos!"),
                 ("admin_password_hash", pass_default),
+                ("must_change_password", "1"),
             ]
             for clave, val in defaults:
                 cur.execute("INSERT OR IGNORE INTO configuracion (clave, valor) VALUES (?, ?)", (clave, val))
@@ -209,11 +244,19 @@ class Database:
         self.ejecutar("INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?, ?)", (clave, str(valor)))
 
     def verificar_admin_pass(self, password_plana):
-        h = hashlib.sha256(password_plana.encode()).hexdigest()
-        return h == self.get_config().get("admin_password_hash", "")
+        stored = self.get_config().get("admin_password_hash", "")
+        if not verify_password(password_plana, stored): return False
+        if is_legacy_hash(stored):
+            self.set_config("admin_password_hash", hash_password(password_plana))
+            logging.info("Hash de admin migrado.")
+        return True
 
     def cambiar_admin_pass(self, nueva_password_plana):
-        self.set_config("admin_password_hash", hashlib.sha256(nueva_password_plana.encode()).hexdigest())
+        self.set_config("admin_password_hash", hash_password(nueva_password_plana))
+        self.set_config("must_change_password", "0")
+
+    def necesita_cambio_password(self) -> bool:
+        return self.get_config().get("must_change_password", "1") == "1"
 
 
 # ============================================================
@@ -244,6 +287,22 @@ class WhatsAppManager:
 #  APP PRINCIPAL
 # ============================================================
 class GymApp(ctk.CTk):
+
+    def _on_search_change(self, _event=None):
+        if getattr(self, "_search_job", None) is not None:
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(250, lambda: self.cargar_tabla(self.search_entry.get()))
+
+    def _forzar_cambio_password(self):
+        dialog = ctk.CTkInputDialog(text="Por seguridad debes establecer una nueva contraseña de administrador.\n\nMínimo 6 caracteres.", title="Cambio Obligatorio")
+        nueva = dialog.get_input()
+        if not nueva or len(nueva) < 6:
+            messagebox.showerror("Error", "La contraseña debe tener al menos 6 caracteres. La aplicación se cerrará.")
+            self.after(100, self.destroy)
+            return
+        self.db.cambiar_admin_pass(nueva)
+        messagebox.showinfo("Listo", "Contraseña actualizada. La anterior ya NO funciona.")
+
     PRECIOS = {"Plan Mensual": 10.0, "Plan Semanal": 3.0, "Plan Diario": 1.0}
     METODOS = ["Pago Móvil", "Efectivo", "Punto de Venta", "Transferencia", "Zelle"]
 
@@ -273,6 +332,9 @@ class GymApp(ctk.CTk):
             self.bind("<Control-Shift-KeyPress-s>", lambda e: self._unlock_super())
         except Exception:
             pass
+
+        if self.db.necesita_cambio_password():
+            self.after(600, self._forzar_cambio_password)
 
     def _cargar_icono(self):
         for name in ("assets/icon.ico", "assets/icon.png"):
@@ -369,7 +431,7 @@ class GymApp(ctk.CTk):
                                          fg_color=COLORS["sidebar"], border_color=COLORS["border"],
                                          text_color=COLORS["text_main"])
         self.search_entry.pack(side="right", padx=(0, 10))
-        self.search_entry.bind("<KeyRelease>", lambda e: self.cargar_tabla(self.search_entry.get()))
+        self.search_entry.bind("<KeyRelease>", self._on_search_change)
 
         kpi = ctk.CTkFrame(self.main, fg_color="transparent")
         kpi.grid(row=1, column=0, sticky="ew", pady=(0, 15))
@@ -544,7 +606,7 @@ class GymApp(ctk.CTk):
             "SELECT COUNT(*) FROM socios WHERE activo=1 AND fecha_vencimiento < date('now')",
             fetch=True)[0][0]
         inicio_mes = datetime.date.today().replace(day=1).strftime("%Y-%m-%d")
-        total = self.db.ejecutar("SELECT COALESCE(SUM(monto),0) FROM pagos WHERE fecha >= ?",
+        total = self.db.ejecutar("SELECT COALESCE(SUM(monto),0) FROM pagos WHERE date(fecha) >= date(?)",
                                  (inicio_mes,), fetch=True)[0][0]
         self.card_activos.configure(text=str(activos))
         self.card_por_vencer.configure(text=str(por_vencer))
@@ -1148,10 +1210,11 @@ class GymApp(ctk.CTk):
                 messagebox.showerror("Error", f"La cédula {c} ya pertenece a otro socio.", parent=parent); return
 
             # Al guardar cambios, si el usuario le puso una nueva fecha, lo reactivamos automáticamente
+            activo = 1 if fv_date >= datetime.date.today() else 0
             self.db.ejecutar(
                 "UPDATE socios SET cedula=?, nombre=?, telefono=?, plan=?, monto=?, "
-                "metodo_pago=?, referencia=?, fecha_vencimiento=?, activo=1 WHERE id=?",
-                (c, n, t, p, mn, m, r, fv_date.strftime("%Y-%m-%d"), socio_id))
+                "metodo_pago=?, referencia=?, fecha_vencimiento=?, activo=? WHERE id=?",
+                (c, n, t, p, mn, m, r, fv_date.strftime("%Y-%m-%d"), activo, socio_id))
             messagebox.showinfo("Éxito", "Datos actualizados.", parent=parent)
             self.cargar_tabla(self.search_entry.get())
             self.actualizar_kpis()
@@ -1514,6 +1577,18 @@ class GymApp(ctk.CTk):
         self.actualizar_kpis()
 
 
+def _configurar_logging():
+    log_dir = Path(platformdirs.user_log_dir("MarvinGym", "MarvinGym"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_dir / "app.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", handlers=[handler, logging.StreamHandler()])
+    logging.info("=== Marvin Gym iniciado ===")
+
 if __name__ == "__main__":
-    app = GymApp()
-    app.mainloop()
+    _configurar_logging()
+    try:
+        app = GymApp()
+        app.mainloop()
+    except Exception:
+        logging.exception("Fallo fatal en la app")
+        raise
