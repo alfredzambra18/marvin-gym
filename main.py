@@ -4,6 +4,8 @@ import urllib.parse
 import sqlite3
 import shutil
 import os
+import glob
+import shutil
 import time
 import hashlib
 import secrets
@@ -132,6 +134,7 @@ class Database:
         self.db_dir.mkdir(parents=True, exist_ok=True)
         self.db_name = str(self.db_dir / "gym.db")
         self.init_db()
+        self.auto_backup()
 
     @contextmanager
     def get_connection(self):
@@ -235,6 +238,30 @@ class Database:
             ]
             for clave, val in defaults:
                 cur.execute("INSERT OR IGNORE INTO configuracion (clave, valor) VALUES (?, ?)", (clave, val))
+
+
+    def auto_backup(self):
+        try:
+            backup_dir = self.db_dir / 'backups'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Crear copia diaria
+            hoy = datetime.date.today().strftime('%Y-%m-%d')
+            destino = backup_dir / f'backup_{hoy}.db'
+            
+            # Si ya existe el de hoy, no hacemos nada
+            if not destino.exists():
+                shutil.copy2(self.db_name, destino)
+                logging.info(f'Respaldo automático creado: {destino.name}')
+                
+            # Limpiar respaldos de más de 7 días
+            limite = datetime.datetime.now() - datetime.timedelta(days=7)
+            for archivo in glob.glob(str(backup_dir / 'backup_*.db')):
+                if os.path.getmtime(archivo) < limite.timestamp():
+                    os.remove(archivo)
+                    logging.info(f'Respaldo antiguo eliminado: {os.path.basename(archivo)}')
+        except Exception as e:
+            logging.error(f'Error en respaldo automático: {e}')
 
     def ejecutar(self, query, params=(), fetch=False):
         with self.get_connection() as conn:
