@@ -1,0 +1,7 @@
+customtkinter
+platformdirs
+tkcalendar
+fpdf2
+matplotlib
+darkdetect
+packaging
